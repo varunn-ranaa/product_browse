@@ -1,86 +1,161 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 const CATEGORIES = ["Electronics", "Clothing", "Books", "Home", "Sports", "Toys", "Food", "Beauty"];
 
 export default function App() {
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [category, setCategory] = useState("");
-  const [page, setPage] = useState(1);
-  const [cursorHistory, setCursorHistory] = useState([null]); // index = page-1
-  const [nextCursor, setNextCursor] = useState(null);
+  const [products, setProducts]       = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState(null);
+  const [category, setCategory]       = useState("");
+  const [page, setPage]               = useState(1);
+  const [cursorHistory, setCursorHistory] = useState([null]);
+  const [nextCursor, setNextCursor]   = useState(null);
 
-  async function fetchProducts(cursor, cat) {
+  // useRef instead of useState — no re-renders, no memory bloata
+  const pageCache    = useRef({});   // pageNum → { data, nextCursor }
+  const prefetchRef  = useRef(null); // in-flight prefetch AbortController
+  const isPrefetched = useRef(false);
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  function buildParams(cursor, cat) {
+    const params = new URLSearchParams();
+    if (cat)    params.set("category",   cat);
+    if (cursor) params.set("updated_at", cursor.updated_at);
+    if (cursor) params.set("id",         cursor.id);
+    return params;
+  }
+
+  function applyPage(data, nextCur, pageNum) {
+    setProducts(data);
+    setNextCursor(nextCur);
+    pageCache.current[pageNum] = { data, nextCursor: nextCur };
+    isPrefetched.current = false;
+  }
+
+  // ── main fetch (shows loader) ───────────────────────────────────────────────
+
+  async function fetchProducts(cursor, cat, targetPage) {
+    // Cancel any in-flight prefetch so they don't race
+    prefetchRef.current?.abort();
+    prefetchRef.current = null;
+    isPrefetched.current = false;
+
     setLoading(true);
     setError(null);
 
-    const params = new URLSearchParams();
-    if (cat) params.set("category", cat);
-    if (cursor) {
-      params.set("updated_at", cursor.updated_at);
-      params.set("id", cursor.id);
-    }
-
     try {
-      const res = await fetch(`${API}/products?${params.toString()}`);
+      const res  = await fetch(`${API}/products?${buildParams(cursor, cat)}`);
       const json = await res.json();
-
       if (!json.success) throw new Error("Server error");
-
-      setProducts(json.data);
-      setNextCursor(json.nextCursor);
+      applyPage(json.data, json.nextCursor, targetPage);
     } catch (err) {
-      setError("Could not reach the server. Make sure your backend is running.");
-      setProducts([]);
+      if (err.name !== "AbortError") {
+        setError("Could not reach the server. Make sure your backend is running.");
+        setProducts([]);
+      }
     } finally {
       setLoading(false);
     }
   }
 
-  // Initial load
+  // ── silent prefetch on hover ────────────────────────────────────────────────
+
+  async function handlePrefetchNext() {
+    const nextPage = page + 1;
+    // Already cached or prefetch in-flight → skip
+    if (!nextCursor || loading || pageCache.current[nextPage] || prefetchRef.current) return;
+
+    const controller = new AbortController();
+    prefetchRef.current = controller;
+
+    try {
+      const res  = await fetch(
+        `${API}/products?${buildParams(nextCursor, category)}`,
+        { signal: controller.signal }
+      );
+      const json = await res.json();
+      if (json.success) {
+        pageCache.current[nextPage] = { data: json.data, nextCursor: json.nextCursor };
+        isPrefetched.current = true;
+      }
+    } catch (err) {
+      // Silent — click will fallback to normal fetch
+    } finally {
+      prefetchRef.current = null;
+    }
+  }
+
+  // ── initial load ────────────────────────────────────────────────────────────
+
   useEffect(() => {
-    fetchProducts(null, "");
+    fetchProducts(null, "", 1);
   }, []);
 
+  // ── toolbar ─────────────────────────────────────────────────────────────────
+
   function handleFilter() {
+    pageCache.current = {};
     setPage(1);
     setCursorHistory([null]);
     setNextCursor(null);
-    fetchProducts(null, category);
+    fetchProducts(null, category, 1);
   }
 
   function handleReset() {
+    pageCache.current = {};
     setCategory("");
     setPage(1);
     setCursorHistory([null]);
     setNextCursor(null);
-    fetchProducts(null, "");
+    fetchProducts(null, "", 1);
   }
 
+  // ── pagination ──────────────────────────────────────────────────────────────
+
   function handleNext() {
-    if (!nextCursor) return;
-    const newHistory = [...cursorHistory];
-    newHistory[page] = nextCursor; // save cursor for this page
+    if (!nextCursor || loading) return; // Bug 3 fix: loading guard
+
+    const nextPageNum = page + 1;
+    const newHistory  = [...cursorHistory];
+    newHistory[page]  = nextCursor;
     setCursorHistory(newHistory);
-    setPage((p) => p + 1);
-    fetchProducts(nextCursor, category);
+    setPage(nextPageNum);
+
+    const cached = pageCache.current[nextPageNum];
+    if (cached) {
+      // Instant — prefetch already warmed the cache (or we visited before)
+      setProducts(cached.data);
+      setNextCursor(cached.nextCursor);
+      isPrefetched.current = false;
+    } else {
+      // Prefetch didn't finish in time → normal fetch with loader
+      fetchProducts(nextCursor, category, nextPageNum);
+    }
   }
 
   function handlePrev() {
-    if (page <= 1) return;
-    const prevPage = page - 2;
-    const cursor = cursorHistory[prevPage] || null;
-    setPage((p) => p - 1);
-    fetchProducts(cursor, category);
+    if (page <= 1 || loading) return;
+
+    const prevPageNum = page - 1;
+    setPage(prevPageNum);
+
+    const cached = pageCache.current[prevPageNum];
+    if (cached) {
+      setProducts(cached.data);
+      setNextCursor(cached.nextCursor);
+    } else {
+      fetchProducts(cursorHistory[prevPageNum - 1] || null, category, prevPageNum);
+    }
   }
+
+  // ── render ──────────────────────────────────────────────────────────────────
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1rem", fontFamily: "system-ui, sans-serif" }}>
 
-      {/* Header */}
       <div style={{ marginBottom: "1.5rem", borderBottom: "1px solid #e5e7eb", paddingBottom: "1rem" }}>
         <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Product browser</h1>
         <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
@@ -88,7 +163,6 @@ export default function App() {
         </p>
       </div>
 
-      {/* Toolbar */}
       <div style={{ display: "flex", gap: 8, marginBottom: "1.25rem" }}>
         <select
           value={category}
@@ -96,22 +170,18 @@ export default function App() {
           style={{ flex: 1, padding: "6px 10px", fontSize: 14, borderRadius: 6, border: "1px solid #d1d5db" }}
         >
           <option value="">All categories</option>
-          {CATEGORIES.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
+          {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
         <button onClick={handleFilter} style={btnStyle("#111", "#fff")}>Filter</button>
-        <button onClick={handleReset} style={btnStyle("#fff", "#374151", "#d1d5db")}>Reset</button>
+        <button onClick={handleReset}  style={btnStyle("#fff", "#374151", "#d1d5db")}>Reset</button>
       </div>
 
-      {/* Error */}
       {error && (
         <div style={{ fontSize: 13, color: "#b91c1c", background: "#fef2f2", padding: "10px 12px", borderRadius: 6, marginBottom: "1rem" }}>
           {error}
         </div>
       )}
 
-      {/* Table */}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid #e5e7eb" }}>
@@ -143,15 +213,26 @@ export default function App() {
         </tbody>
       </table>
 
-      {/* Pagination */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid #e5e7eb" }}>
         <span style={{ fontSize: 13, color: "#6b7280" }}>Page {page}</span>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={handlePrev} disabled={page <= 1} style={btnStyle("#fff", "#374151", "#d1d5db")}>← Prev</button>
-          <button onClick={handleNext} disabled={!nextCursor} style={btnStyle("#fff", "#374151", "#d1d5db")}>Next →</button>
+          <button
+            onClick={handlePrev}
+            disabled={page <= 1 || loading}
+            style={btnStyle("#fff", "#374151", "#d1d5db")}
+          >
+            ← Prev
+          </button>
+          <button
+            onClick={handleNext}
+            onMouseEnter={handlePrefetchNext}
+            disabled={!nextCursor || loading}        // Bug 3 fix
+            style={btnStyle("#fff", "#374151", "#d1d5db")}
+          >
+            Next →
+          </button>
         </div>
       </div>
-
     </div>
   );
 }
