@@ -18,7 +18,6 @@ export default function App() {
   const prefetchRef  = useRef(null); // in-flight prefetch AbortController
   const isPrefetched = useRef(false);
 
-  // ── helpers ────────────────────────────────────────────────────────────────
 
   function buildParams(cursor, cat) {
     const params = new URLSearchParams();
@@ -34,8 +33,6 @@ export default function App() {
     pageCache.current[pageNum] = { data, nextCursor: nextCur };
     isPrefetched.current = false;
   }
-
-  // ── main fetch (shows loader) ───────────────────────────────────────────────
 
   async function fetchProducts(cursor, cat, targetPage) {
     // Cancel any in-flight prefetch so they don't race
@@ -61,7 +58,6 @@ export default function App() {
     }
   }
 
-  // ── silent prefetch on hover ────────────────────────────────────────────────
 
   async function handlePrefetchNext() {
     const nextPage = page + 1;
@@ -88,13 +84,10 @@ export default function App() {
     }
   }
 
-  // ── initial load ────────────────────────────────────────────────────────────
-
   useEffect(() => {
     fetchProducts(null, "", 1);
   }, []);
 
-  // ── toolbar ─────────────────────────────────────────────────────────────────
 
   function handleFilter() {
     pageCache.current = {};
@@ -113,10 +106,8 @@ export default function App() {
     fetchProducts(null, "", 1);
   }
 
-  // ── pagination ──────────────────────────────────────────────────────────────
-
   function handleNext() {
-    if (!nextCursor || loading) return; // Bug 3 fix: loading guard
+    if (!nextCursor || loading) return; 
 
     const nextPageNum = page + 1;
     const newHistory  = [...cursorHistory];
@@ -150,8 +141,6 @@ export default function App() {
       fetchProducts(cursorHistory[prevPageNum - 1] || null, category, prevPageNum);
     }
   }
-
-  // ── render ──────────────────────────────────────────────────────────────────
 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto", padding: "2rem 1rem", fontFamily: "system-ui, sans-serif" }}>
@@ -226,7 +215,7 @@ export default function App() {
           <button
             onClick={handleNext}
             onMouseEnter={handlePrefetchNext}
-            disabled={!nextCursor || loading}        // Bug 3 fix
+            disabled={!nextCursor || loading}      
             style={btnStyle("#fff", "#374151", "#d1d5db")}
           >
             Next →
